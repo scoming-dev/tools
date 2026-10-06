@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"math"
 	"strings"
@@ -299,6 +300,104 @@ func writePDFTestDocument(pages int) []byte {
 	}
 	fmt.Fprintf(&builder, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, startxref)
 	return []byte(builder.String())
+}
+
+// writePDFImagePagesTestDocument builds a two-page PDF in the shape of a CAD
+// export whose text was converted to curves: page one carries nothing but a
+// small stamp-like picture and page two is covered by one picture. The engine
+// reports no text for either page.
+func writePDFImagePagesTestDocument(t *testing.T) []byte {
+	t.Helper()
+	var picture bytes.Buffer
+	frame := image.NewRGBA(image.Rect(0, 0, 8, 4))
+	for x := 0; x < 8; x++ {
+		for y := 0; y < 4; y++ {
+			frame.Set(x, y, color.RGBA{R: uint8(20 * x), G: uint8(60 * y), B: 200, A: 255})
+		}
+	}
+	if err := jpeg.Encode(&picture, frame, nil); err != nil {
+		t.Fatal(err)
+	}
+	payload := picture.Bytes()
+
+	objects := [][]byte{
+		[]byte("<< /Type /Catalog /Pages 2 0 R >>"),
+		[]byte("<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>"),
+		[]byte("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im0 7 0 R >> >> /Contents 4 0 R >>"),
+		pdfTestContentStream("q 72 0 0 36 270 60 cm /Im0 Do Q"),
+		[]byte("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im0 7 0 R >> >> /Contents 6 0 R >>"),
+		pdfTestContentStream("q 612 0 0 792 0 0 cm /Im0 Do Q"),
+		[]byte(fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width 8 /Height 4 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length %d >>\nstream\n%s\nendstream", len(payload), payload)),
+	}
+
+	var builder bytes.Buffer
+	builder.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objects)+1)
+	for index, body := range objects {
+		offsets[index+1] = builder.Len()
+		fmt.Fprintf(&builder, "%d 0 obj\n", index+1)
+		builder.Write(body)
+		builder.WriteString("\nendobj\n")
+	}
+	startxref := builder.Len()
+	fmt.Fprintf(&builder, "xref\n0 %d\n", len(objects)+1)
+	builder.WriteString("0000000000 65535 f \n")
+	for index := 1; index <= len(objects); index++ {
+		fmt.Fprintf(&builder, "%010d 00000 n \n", offsets[index])
+	}
+	fmt.Fprintf(&builder, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, startxref)
+	return builder.Bytes()
+}
+
+func pdfTestContentStream(content string) []byte {
+	return []byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content))
+}
+
+func pdfTestNameHandler(_ context.Context, image core.Image) (string, error) {
+	return image.Name, nil
+}
+
+// TestConvertPDFRasterizesDecorationOnlyPage covers the drawing-sheet case: a
+// page with no text whose only picture is a stamp must become a whole-page
+// picture, because exporting the stamp alone would lose the sheet. A page
+// covered by its picture keeps the embedded image.
+func TestConvertPDFRasterizesDecorationOnlyPage(t *testing.T) {
+	data := writePDFImagePagesTestDocument(t)
+	settings := &core.Settings{
+		PDF:          core.NormalizePDFOptions(core.PDFOptions{}),
+		ImageHandler: pdfTestNameHandler,
+	}
+	result, err := convertPDF(context.Background(), data, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Metadata["pdf_rendered_pages"]; got != "1" {
+		t.Fatalf("rendered pages = %q, want 1:\n%s", got, result.Markdown)
+	}
+	want := "![第 1 页](pdf-page-1.jpg)\n\n![](pdf-page-2-image-1.jpg)"
+	if result.Markdown != want {
+		t.Fatalf("unexpected markdown:\n%q\nwant:\n%q", result.Markdown, want)
+	}
+}
+
+// TestConvertPDFKeepsStampWhenRenderingIsDisabled pins the fallback flag: a
+// caller that opted out of rasterizing text-less pages still gets the stamp.
+func TestConvertPDFKeepsStampWhenRenderingIsDisabled(t *testing.T) {
+	data := writePDFImagePagesTestDocument(t)
+	settings := &core.Settings{
+		PDF:          core.NormalizePDFOptions(core.PDFOptions{DisablePageRenderFallback: true}),
+		ImageHandler: pdfTestNameHandler,
+	}
+	result, err := convertPDF(context.Background(), data, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.Markdown, "pdf-page-1.jpg") {
+		t.Fatalf("rendering was disabled but a page was rasterized:\n%s", result.Markdown)
+	}
+	if !strings.Contains(result.Markdown, "pdf-page-1-image-1.jpg") {
+		t.Fatalf("the stamp should have been kept:\n%s", result.Markdown)
+	}
 }
 
 // TestConvertPDFPageWorkersMatchSequential is the contract for the parallel page

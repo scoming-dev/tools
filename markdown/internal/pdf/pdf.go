@@ -235,8 +235,54 @@ func convertPDFPagesParallel(
 	return results, nil
 }
 
+// pdfDecorationPageShare is the share of the page area below which a picture
+// drawn on a page without any text counts as decoration rather than as the
+// page's content.
+//
+// Drawing sheets are the reason the threshold exists. A CAD export whose text
+// was converted to curves reaches the engine as vector art, which yields no
+// text lines at all, and the only image object it reports is the design stamp
+// in the title block. Keeping that stamp would drop the sheet it is stamped on,
+// so the page is rasterized instead; a scanned page, whose picture covers the
+// page, is left as it is.
+//
+// The two cases are far apart - a title-block stamp covers a few percent of the
+// sheet while a page-sized scan covers most of it - so the cutoff only has to
+// sit in the wide gap between them, and erring towards rasterizing costs little:
+// the picture is still part of the rendered page.
+const pdfDecorationPageShare = 0.2
+
+// pageIsDecorationOnly reports whether a page carries no text and nothing but
+// decorative pictures, the shape of an image-less drawing sheet that only
+// carries a stamp, seal or watermark.
+//
+// A page with no picture at all is not decoration: it has no content to lose,
+// and convertPDFPage already rasterizes it.
+func pageIsDecorationOnly(lines []pdfTextLine, images []pdfPlacedImage, width, height float64) bool {
+	if len(images) == 0 || width <= 0 || height <= 0 {
+		return false
+	}
+	for _, line := range lines {
+		if line.Text() != "" {
+			return false
+		}
+	}
+	covered := 0.0
+	for _, image := range images {
+		imageWidth := image.Right - image.Left
+		imageHeight := image.Top - image.Bottom
+		if imageWidth <= 0 || imageHeight <= 0 {
+			// Without a usable placement rectangle the picture cannot be
+			// classified; keep the page as it is.
+			return false
+		}
+		covered += imageWidth * imageHeight
+	}
+	return covered < width*height*pdfDecorationPageShare
+}
+
 // convertPDFPage converts a single page, falling back to a whole-page picture
-// when the page has no text and no image to keep.
+// when the page has no text and no content picture to keep.
 func convertPDFPage(
 	ctx context.Context,
 	document *pdfDocument,
@@ -256,6 +302,16 @@ func convertPDFPage(
 	images, err := document.PageImages(page)
 	if err != nil {
 		return "", stats, err
+	}
+	// A sheet whose text was converted to curves arrives with no text and only
+	// its stamp left; drop the decoration so the page falls through to the
+	// whole-page picture below instead of being reduced to a stamp that says
+	// nothing about the sheet. Disabling the fallback keeps the old behaviour,
+	// because the caller asked for pages without text not to be rasterized.
+	if !options.DisablePageRenderFallback {
+		if width, height, sizeErr := document.PageSize(page); sizeErr == nil && pageIsDecorationOnly(lines, images, width, height) {
+			lines, images = nil, nil
+		}
 	}
 	content, stats, err := renderPDFItems(ctx, document.RenderImageRegion, page, lines, images, options, tableFormat, imageHandler, usedImages)
 	if err != nil {

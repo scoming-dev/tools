@@ -224,6 +224,72 @@ func TestPDFLayoutSeparatesAdjacentImagesWithBlankLines(t *testing.T) {
 	}
 }
 
+// TestPDFPageDecorationDetection pins the rule that keeps a drawing sheet whose
+// text was converted to curves from being reduced to the stamp in its title
+// block: a text-less page is decoration only while its pictures stay small
+// against the page.
+func TestPDFPageDecorationDetection(t *testing.T) {
+	const (
+		pageWidth  = 595.0
+		pageHeight = pdfTestPageHeight
+	)
+	text := buildPDFTextLines(pdfTestPage(pdfTestLine(90, 72, 11, 11, "Sheet title")), pageHeight)
+	tests := []struct {
+		name   string
+		lines  []pdfTextLine
+		images []pdfPlacedImage
+		want   bool
+	}{
+		{
+			name:   "stamp on an image-less sheet",
+			images: []pdfPlacedImage{pdfTestPlacedImage(700, 270, 72, 36)},
+			want:   true,
+		},
+		{
+			name:   "picture covering the page",
+			images: []pdfPlacedImage{pdfTestPlacedImage(200, 72, 400, 400)},
+			want:   false,
+		},
+		{
+			name:   "picture smaller than a tenth of the page",
+			images: []pdfPlacedImage{pdfTestPlacedImage(500, 72, 160, 160)},
+			want:   true,
+		},
+		{
+			name:   "picture just above the decoration share",
+			images: []pdfPlacedImage{pdfTestPlacedImage(400, 72, 317, 317)},
+			want:   false,
+		},
+		{
+			name:   "picture just below the decoration share",
+			images: []pdfPlacedImage{pdfTestPlacedImage(400, 72, 316, 316)},
+			want:   true,
+		},
+		{
+			name:   "text page with a stamp",
+			lines:  text,
+			images: []pdfPlacedImage{pdfTestPlacedImage(700, 270, 72, 36)},
+			want:   false,
+		},
+		{
+			name: "page without pictures",
+			want: false,
+		},
+		{
+			name:   "picture without a usable placement rectangle",
+			images: []pdfPlacedImage{{PixelWidth: 8, PixelHeight: 4, MIMEType: "image/png"}},
+			want:   false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := pageIsDecorationOnly(test.lines, test.images, pageWidth, pageHeight); got != test.want {
+				t.Fatalf("pageIsDecorationOnly() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestPDFLayoutBuildsLinesAndPlacesImages(t *testing.T) {
 	lines := buildPDFTextLines(pdfTestPage(pdfTestLine(90, 72, 11, 11, "Caption text")), pdfTestPageHeight)
 	if len(lines) != 1 {
